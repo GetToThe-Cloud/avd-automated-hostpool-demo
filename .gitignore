@@ -1,0 +1,2 @@
+# Deployment outputs written by scripts/01-Deploy-Environment.ps1 (subscription and resource IDs)
+scripts/demo-environment.json

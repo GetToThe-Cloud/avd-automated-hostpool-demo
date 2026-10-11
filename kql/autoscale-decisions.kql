@@ -1,0 +1,18 @@
+// Why did autoscale do what it did? The latest evaluations for Pool A, with autoscale's own reason.
+// Source: WVDAutoscaleEvaluationPooled, from the host pool diagnostic category AutoscaleEvaluationPooled.
+// Ingestion trails a few minutes behind; 21-Watch-PoolA.ps1 shows the live side.
+let hostPool = 'vdpool-avddemo-scale';
+WVDAutoscaleEvaluationPooled
+| where TimeGenerated > ago(4h)
+| where _ResourceId endswith strcat('/hostpools/', hostPool)
+| project TimeGenerated,
+          Phase = ConfigSchedulePhase,
+          Sessions = SessionCount,
+          ActiveHosts = ActiveSessionHostCount,
+          TotalHosts = TotalSessionHostCount,
+          UsedPct = round(SessionOccupancyPercent),
+          ThresholdPct = ConfigCapacityThresholdPercent,
+          MinActivePct = ConfigMinActiveSessionHostsPercent,
+          ResultType,
+          ScalingReasonMessage
+| order by TimeGenerated desc

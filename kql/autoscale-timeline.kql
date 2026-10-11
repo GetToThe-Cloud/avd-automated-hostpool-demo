@@ -1,0 +1,12 @@
+// Sessions against hosts over time for Pool A: the picture for the Harvest segment.
+// The steps in TotalHosts are the hosts dynamic autoscaling created and deleted.
+let hostPool = 'vdpool-avddemo-scale';
+WVDAutoscaleEvaluationPooled
+| where TimeGenerated > ago(4h)
+| where _ResourceId endswith strcat('/hostpools/', hostPool)
+| summarize Sessions = max(SessionCount),
+            ActiveHosts = max(ActiveSessionHostCount),
+            TotalHosts = max(TotalSessionHostCount)
+            by bin(TimeGenerated, 5m)
+| order by TimeGenerated asc
+| render timechart

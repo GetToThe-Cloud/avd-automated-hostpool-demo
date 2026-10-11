@@ -1,0 +1,15 @@
+// Autoscale evaluations that failed or partly failed, joined to WVDErrors for the details.
+// Typical finds: missing role assignments on the subscription, quota, or a host that
+// couldn't reach wvdhpustgr0prod.blob.core.windows.net (CustomerVmNoAccessToDeploymentPackageException).
+let hostPool = 'vdpool-avddemo-scale';
+WVDAutoscaleEvaluationPooled
+| where TimeGenerated > ago(1d)
+| where _ResourceId endswith strcat('/hostpools/', hostPool)
+| where ResultType != 'Succeeded'
+| join kind=leftouter (
+    WVDErrors
+    | where TimeGenerated > ago(1d)
+    | project CorrelationId, ErrorTime = TimeGenerated, CodeSymbolic, Message, ServiceError
+  ) on CorrelationId
+| project TimeGenerated, ConfigSchedulePhase, ResultType, ScalingReasonMessage, ErrorTime, CodeSymbolic, Message, ServiceError
+| order by TimeGenerated desc

@@ -1,0 +1,33 @@
+// Session host management runs for Pool B, newest first: provisioning runs (instanceCount)
+// and session host updates, with the configuration version they moved from and to.
+// Source: WVDSessionHostManagement, from the host pool diagnostic category SessionHostManagement.
+let hostPool = 'vdpool-avddemo-patch';
+WVDSessionHostManagement
+| where TimeGenerated > ago(7d)
+| where _ResourceId endswith strcat('/hostpools/', hostPool)
+| summarize arg_max(TimeGenerated, *) by CorrelationId
+| project TimeGenerated,
+          ProvisioningType,
+          ProvisioningStatus,
+          FromSessionHostConfigVer,
+          ToSessionHostConfigVer,
+          BatchSize = UpdateMaxVmsRemoved,
+          DeleteOriginalVm = UpdateDeleteOriginalVm,
+          ScheduledDateTime,
+          FromInstanceCount,
+          ToInstanceCount,
+          CorrelationId
+| order by TimeGenerated desc
+
+// Minutes per replaced host, from the checkpoints session host update writes.
+// Log Analytics runs the block your cursor is in; blocks are separated by an empty line.
+WVDCheckpoints
+| where TimeGenerated > ago(7d)
+| where _ResourceId endswith '/hostpools/vdpool-avddemo-patch'
+| where Name == 'SessionHostUpdateCompleted'
+| extend Parameters = parse_json(Parameters)
+| project TimeGenerated,
+          CorrelationId,
+          Minutes = round(todouble(Parameters.TimeTakenToUpdateSessionHostInSeconds) / 60, 1),
+          Parameters
+| order by TimeGenerated desc

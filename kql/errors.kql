@@ -1,0 +1,13 @@
+// Everything that went wrong in the demo host pools in the last day: provisioning,
+// session host update, autoscale and connections. Start here when a host doesn't show up.
+WVDErrors
+| where TimeGenerated > ago(1d)
+| where _ResourceId contains '/hostpools/vdpool-avddemo-'
+| project TimeGenerated,
+          HostPool = extract(@'(?i)/hostpools/([^/]+)$', 1, _ResourceId),
+          Source,
+          CodeSymbolic,
+          Message,
+          ServiceError,
+          CorrelationId
+| order by TimeGenerated desc
