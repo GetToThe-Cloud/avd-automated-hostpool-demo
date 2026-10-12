@@ -4,14 +4,14 @@
     One-time checks for the AVD automated host pool demo.
 
 .DESCRIPTION
-    Checks PowerShell modules and the Bicep CLI, registers the resource providers, checks that
-    the region and VM size work for your subscription, compares the vCPU quota with what the
-    demo needs, and looks up the Azure Virtual Desktop service principal.
+    Checks PowerShell modules, Azure CLI and Bicep CLI, registers the resource providers,
+    checks that the region and VM size work for your subscription, compares the vCPU quota
+    with what the demo needs, and looks up the Azure Virtual Desktop service principal.
     With -EnableEntraSso it also switches on Microsoft Entra authentication for RDP in your
     tenant, which the host pools' enablerdsaadauth:i:1 RDP property relies on.
 
 .EXAMPLE
-    ./00-Prerequisites.ps1 -SubscriptionId <id> -InstallMissingModules
+    ./00-Prerequisites.ps1 -SubscriptionId <id> -InstallMissingPrerequisites
 
 .EXAMPLE
     ./00-Prerequisites.ps1 -SubscriptionId <id> -EnableEntraSso
@@ -30,13 +30,16 @@ param(
     [ValidateRange(1, 100)]
     [int] $PlannedHosts = 6,
 
-    [switch] $InstallMissingModules,
+    [Alias('InstallMissingModules')]
+    [switch] $InstallMissingPrerequisites,
 
     [switch] $EnableEntraSso
 )
 
 $ErrorActionPreference = 'Stop'
 $results = [System.Collections.Generic.List[object]]::new()
+Import-Module -Name (Join-Path $PSScriptRoot 'AvdDemo.psm1') -Force
+
 function Add-Result([string] $Check, [string] $Result, [string] $Detail) {
     $results.Add([pscustomobject]@{ Check = $Check; Result = $Result; Detail = $Detail })
     $color = switch ($Result) { 'OK' { 'Green' } 'WARN' { 'Yellow' } default { 'Red' } }
@@ -44,6 +47,54 @@ function Add-Result([string] $Check, [string] $Result, [string] $Detail) {
 }
 
 Write-Host "`nAVD automated host pool demo: prerequisites`n" -ForegroundColor Cyan
+
+# --- Azure CLI -------------------------------------------------------------------------
+function Get-AzureCliCommand {
+    $command = Get-Command -Name az -ErrorAction SilentlyContinue
+    if ($command) { return $command }
+
+    $cliPaths = @()
+    if ($env:ProgramFiles) {
+        $cliPaths += Join-Path -Path $env:ProgramFiles -ChildPath 'Microsoft SDKs\Azure\CLI2\wbin\az.cmd'
+    }
+    if (${env:ProgramFiles(x86)}) {
+        $cliPaths += Join-Path -Path ${env:ProgramFiles(x86)} -ChildPath 'Microsoft SDKs\Azure\CLI2\wbin\az.cmd'
+    }
+    foreach ($cliPath in $cliPaths) {
+        if (Test-Path -Path $cliPath) {
+            $env:Path = "$(Split-Path -Path $cliPath -Parent);$env:Path"
+            return Get-Command -Name az -ErrorAction SilentlyContinue
+        }
+    }
+    $null
+}
+
+$azureCli = Get-AzureCliCommand
+if (-not $azureCli -and $InstallMissingPrerequisites) {
+    $winget = Get-Command -Name winget -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        Add-Result -Check 'Azure CLI' -Result 'FAIL' -Detail 'winget is not available; install from https://aka.ms/installazurecliwindows'
+    }
+    else {
+        & $winget.Source install --exact --id Microsoft.AzureCLI
+        if ($LASTEXITCODE -ne 0) {
+            throw "winget failed to install Azure CLI (exit code $LASTEXITCODE). Install it from https://aka.ms/installazurecliwindows."
+        }
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = (@($machinePath, $userPath) -join [System.IO.Path]::PathSeparator) + [System.IO.Path]::PathSeparator + $env:Path
+        $azureCli = Get-AzureCliCommand
+        if (-not $azureCli) {
+            Add-Result -Check 'Azure CLI' -Result 'FAIL' -Detail 'installed, but not visible in this PowerShell session; close and reopen the terminal'
+        }
+    }
+}
+if ($azureCli) {
+    Add-Result -Check 'Azure CLI' -Result 'OK' -Detail "available at $($azureCli.Source)"
+}
+elseif (-not ($results | Where-Object { $_.Check -eq 'Azure CLI' -and $_.Result -eq 'FAIL' })) {
+    Add-Result -Check 'Azure CLI' -Result 'FAIL' -Detail 'not on PATH; rerun with -InstallMissingPrerequisites to install using winget'
+}
 
 # --- PowerShell modules and Bicep ------------------------------------------------------
 $modules = @(
@@ -58,7 +109,7 @@ foreach ($module in $modules) {
         Add-Result -Check $module.Name -Result 'OK' -Detail "version $($installed.Version)"
         continue
     }
-    if ($InstallMissingModules) {
+    if ($InstallMissingPrerequisites) {
         Install-Module -Name $module.Name -MinimumVersion $module.MinimumVersion -Scope CurrentUser -Repository PSGallery -Force -AllowClobber
         Add-Result -Check $module.Name -Result 'OK' -Detail 'installed'
     }
@@ -69,13 +120,24 @@ foreach ($module in $modules) {
 Write-Host '  (Az.DesktopVirtualization is optional: the scripts call the preview REST API directly.)' -ForegroundColor DarkGray
 
 $bicep = Get-Command -Name bicep -ErrorAction SilentlyContinue
+if (-not $bicep -and $InstallMissingPrerequisites -and $azureCli) {
+    & $azureCli.Source bicep install
+    if ($LASTEXITCODE -ne 0) {
+        throw "az bicep install failed (exit code $LASTEXITCODE). Install Bicep from https://aka.ms/bicep-install."
+    }
+    $bicepBin = Join-Path -Path $HOME -ChildPath '.azure\bin'
+    if (Test-Path -Path (Join-Path -Path $bicepBin -ChildPath 'bicep.exe')) {
+        $env:Path = "$bicepBin;$env:Path"
+    }
+    $bicep = Get-Command -Name bicep -ErrorAction SilentlyContinue
+}
 if ($bicep) {
     $bicepVersion = [regex]::Match((& $bicep.Source --version), '\d+\.\d+\.\d+').Value
     $result = if ([version]$bicepVersion -ge [version]'0.30.0') { 'OK' } else { 'WARN' }
     Add-Result -Check 'Bicep CLI' -Result $result -Detail "version $bicepVersion (0.30 or later recommended)"
 }
 else {
-    Add-Result -Check 'Bicep CLI' -Result 'FAIL' -Detail 'not on PATH. Az PowerShell needs it to deploy .bicep files: https://aka.ms/bicep-install'
+    Add-Result -Check 'Bicep CLI' -Result 'FAIL' -Detail 'not on PATH; rerun with -InstallMissingPrerequisites to install Azure CLI and run az bicep install'
 }
 
 # --- Azure context -----------------------------------------------------------------------
@@ -97,8 +159,17 @@ foreach ($namespace in $providers) {
 }
 
 # --- Region and VM size --------------------------------------------------------------------
-$location = Get-AzLocation | Where-Object { $_.Location -eq $Region }
+$location = Get-AzLocation | Where-Object { $_.Location -eq $Region } | Select-Object -First 1
 if (-not $location) { throw "Unknown region '$Region'." }
+
+$requestedRegion = $Region
+$deploymentTarget = Resolve-AvdDeploymentTarget -RequestedVmSize $VmSize -Region $Region
+if ($deploymentTarget.IsRegionFallback) {
+    $Region = $deploymentTarget.Region
+    $location = Get-AzLocation | Where-Object { $_.Location -eq $Region } | Select-Object -First 1
+    Add-Result -Check 'Deployment region' -Result 'WARN' -Detail "No compatible VM size in $requestedRegion; using $($location.DisplayName) instead"
+}
+
 $hostPoolRegions = ((Get-AzResourceProvider -ProviderNamespace Microsoft.DesktopVirtualization).ResourceTypes |
     Where-Object { $_.ResourceTypeName -eq 'hostpools' }).Locations
 if ($hostPoolRegions -contains $location.DisplayName) {
@@ -108,17 +179,17 @@ else {
     Add-Result -Check 'AVD metadata region' -Result 'FAIL' -Detail "$($location.DisplayName) can't hold host pools; pick another -Region"
 }
 
-$sku = Get-AzComputeResourceSku -Location $Region | Where-Object { $_.ResourceType -eq 'virtualMachines' -and $_.Name -eq $VmSize } | Select-Object -First 1
+$vmSelection = $deploymentTarget.VmSizeSelection
+$sku = $vmSelection.Sku
 if (-not $sku) {
-    Add-Result -Check 'VM size' -Result 'FAIL' -Detail "$VmSize doesn't exist in $Region"
+    Add-Result -Check 'VM size' -Result 'FAIL' -Detail $deploymentTarget.FailureReason
 }
 else {
-    $restricted = @($sku.Restrictions | Where-Object { $_.ReasonCode -eq 'NotAvailableForSubscription' -and $_.Type -eq 'Location' })
-    if ($restricted.Count) {
-        Add-Result -Check 'VM size' -Result 'FAIL' -Detail "$VmSize is restricted for this subscription in $Region"
+    if ($vmSelection.IsFallback) {
+        Add-Result -Check 'VM size' -Result 'WARN' -Detail "$VmSize isn't usable for this subscription; selected $($sku.Name) ($($sku.Family)) in $($location.DisplayName)"
     }
     else {
-        Add-Result -Check 'VM size' -Result 'OK' -Detail "$VmSize ($($sku.Family))"
+        Add-Result -Check 'VM size' -Result 'OK' -Detail "$($sku.Name) ($($sku.Family))"
     }
 
     # --- Quota -------------------------------------------------------------------------------
@@ -155,14 +226,64 @@ else {
 # --- Microsoft Entra authentication for RDP (single sign-on) ----------------------------------
 $windowsCloudLoginAppId = '270efc09-cd0d-444b-a71f-39af4910ec45'
 if ($EnableEntraSso) {
-    foreach ($name in 'Microsoft.Graph.Authentication', 'Microsoft.Graph.Applications') {
-        if (-not (Get-Module -ListAvailable -Name $name)) {
-            if ($InstallMissingModules) { Install-Module -Name $name -Scope CurrentUser -Repository PSGallery -Force }
-            else { throw "$name is needed for -EnableEntraSso. Rerun with -InstallMissingModules." }
+    $loadedAuthentication = Get-Module -Name Microsoft.Graph.Authentication | Select-Object -First 1
+    $availableApplications = @(Get-Module -ListAvailable -Name Microsoft.Graph.Applications)
+    $availableAuthentication = @(Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)
+    if ($loadedAuthentication) {
+        $graphVersion = $loadedAuthentication.Version
+    }
+    else {
+        $matchingVersions = @($availableApplications | Where-Object { $availableAuthentication.Version -contains $_.Version } |
+            Sort-Object -Property Version -Descending)
+        if ($matchingVersions.Count) {
+            $graphVersion = $matchingVersions[0].Version
+        }
+        elseif ($availableApplications.Count) {
+            $graphVersion = ($availableApplications | Sort-Object -Property Version -Descending | Select-Object -First 1).Version
+        }
+        else {
+            Write-Host '  Installing Microsoft.Graph.Applications for -EnableEntraSso...'
+            Install-Module -Name Microsoft.Graph.Applications -Scope CurrentUser -Repository PSGallery -Force
+            $graphVersion = (Get-Module -ListAvailable -Name Microsoft.Graph.Applications |
+                Sort-Object -Property Version -Descending | Select-Object -First 1).Version
         }
     }
-    Import-Module Microsoft.Graph.Authentication, Microsoft.Graph.Applications
-    Connect-MgGraph -Scopes 'Application.Read.All', 'Application-RemoteDesktopConfig.ReadWrite.All' -NoWelcome
+
+    foreach ($name in 'Microsoft.Graph.Authentication', 'Microsoft.Graph.Applications') {
+        $loadedModule = Get-Module -Name $name | Where-Object { $_.Version -eq $graphVersion } | Select-Object -First 1
+        $availableModule = Get-Module -ListAvailable -Name $name | Where-Object { $_.Version -eq $graphVersion } | Select-Object -First 1
+        $conflictingModule = Get-Module -Name $name | Where-Object { $_.Version -ne $graphVersion } | Select-Object -First 1
+        if ($conflictingModule) {
+            throw "$name version $($conflictingModule.Version) is already loaded, but version $graphVersion is required. Close and reopen PowerShell, then rerun this script."
+        }
+        if (-not $loadedModule -and -not $availableModule) {
+            Write-Host "  Installing $name $graphVersion to match the loaded Graph SDK..."
+            if ($name -eq 'Microsoft.Graph.Applications' -and $loadedAuthentication -and $loadedAuthentication.Version -eq $graphVersion) {
+                $installCommand = Get-Command -Name Install-PSResource -ErrorAction SilentlyContinue
+                if ($installCommand) {
+                    Install-PSResource -Name $name -Version $graphVersion -Scope CurrentUser -Repository PSGallery -TrustRepository -SkipDependencyCheck -Quiet
+                }
+                else {
+                    Install-Module -Name $name -RequiredVersion $graphVersion -Scope CurrentUser -Repository PSGallery -Force -SkipPublisherCheck -AllowClobber -ErrorAction Stop
+                }
+            }
+            else {
+                Install-Module -Name $name -RequiredVersion $graphVersion -Scope CurrentUser -Repository PSGallery -Force -ErrorAction Stop
+            }
+            $availableModule = Get-Module -ListAvailable -Name $name | Where-Object { $_.Version -eq $graphVersion } | Select-Object -First 1
+            if (-not $availableModule) {
+                throw "Failed to install $name version $graphVersion. Check the PowerShell Gallery connection and retry."
+            }
+        }
+    }
+    Import-Module Microsoft.Graph.Authentication -RequiredVersion $graphVersion
+    Import-Module Microsoft.Graph.Applications -RequiredVersion $graphVersion
+    try {
+        Connect-MgGraph -Scopes 'Application.Read.All', 'Application-RemoteDesktopConfig.ReadWrite.All' -NoWelcome -ErrorAction Stop
+    }
+    catch {
+        throw "Microsoft Graph sign-in failed or was canceled. Rerun with -EnableEntraSso and complete the browser sign-in. $($_.Exception.Message)"
+    }
     $wclSp = Get-MgServicePrincipal -Filter "AppId eq '$windowsCloudLoginAppId'"
     $config = Get-MgServicePrincipalRemoteDesktopSecurityConfiguration -ServicePrincipalId $wclSp.Id -ErrorAction SilentlyContinue
     if (-not ($config -and $config.IsRemoteDesktopProtocolEnabled)) {

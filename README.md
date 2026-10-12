@@ -28,17 +28,19 @@ Nobody registers a session host anywhere. Pool B gets its two hosts through `pro
 
 ## Before you start
 
-You need PowerShell 7.2 or later with Az.Accounts, Az.Resources, Az.Compute and Az.OperationalInsights, and the Bicep CLI on your PATH (Az PowerShell calls it to compile `main.bicep`). The preview Az.DesktopVirtualization module is optional; the scripts talk to the REST API directly.
+You need PowerShell 7.2 or later with Az.Accounts, Az.Resources, Az.Compute and Az.OperationalInsights, plus Azure CLI and the Bicep CLI (Az PowerShell calls Bicep to compile `main.bicep`). The preview Az.DesktopVirtualization module is optional; the scripts talk to the REST API directly. The prerequisites script can install missing PowerShell modules, Azure CLI (using winget), and Bicep. The PowerShell scripts automatically select a compatible VM size and fall back from UK South to West Europe if UK South has no eligible size; for direct Bicep deployments, set `vmSize` and `region` to values allowed by your subscription.
 
 Use a subscription where you are Owner, or Contributor plus User Access Administrator. Dynamic autoscaling needs two roles for the Azure Virtual Desktop service principal at subscription scope (Power On Off Contributor and Virtual Machine Contributor), so a dedicated demo subscription keeps that blast radius small.
 
-Create an Entra group with three test users who are licensed for Azure Virtual Desktop. The host pools use Microsoft Entra single sign-on (`enablerdsaadauth:i:1`); if that isn't switched on in your tenant yet, the prerequisites script can do it for you. Check the quota too: the demo peaks at six `Standard_D4ads_v5` hosts, so 24 vCPUs in the DADSv5 family.
+Create an Entra group with three test users who are licensed for Azure Virtual Desktop. The host pools use Microsoft Entra single sign-on (`enablerdsaadauth:i:1`); if that isn't switched on in your tenant yet, the prerequisites script can do it for you. If the default `Standard_D4ads_v5` is restricted, both scripts select a compatible size with the same vCPU and memory, Gen2, Trusted Launch, and Premium Storage support. If UK South has no eligible size, they use West Europe. Check the quota too: the demo peaks at six hosts, so 24 vCPUs in the selected VM family and region.
 
 ```powershell
 cd scripts
-./00-Prerequisites.ps1 -SubscriptionId <subscription-id> -InstallMissingModules
+./00-Prerequisites.ps1 -SubscriptionId <subscription-id> -InstallMissingPrerequisites
 ./00-Prerequisites.ps1 -SubscriptionId <subscription-id> -EnableEntraSso   # once per tenant, if needed
 ```
+
+When `-EnableEntraSso` is used, missing Microsoft Graph modules are installed at a version compatible with the Graph module already loaded in the session. Complete the interactive browser sign-in when prompted; if sign-in is canceled, the script stops without changing the tenant setting.
 
 ## Deploy, the day before
 
@@ -101,7 +103,7 @@ Log Analytics trails a few minutes behind. The watch scripts read hosts and sess
 
 ## Cost
 
-Almost all of the cost is VM hours: two to four `Standard_D4ads_v5` hosts in Pool A and two in Pool B while the environment exists, plus their Premium SSD OS disks. The NAT gateway, the gallery replicas, the two source disks, Key Vault and Log Analytics add a little on top. Deploy the day before, remove it after the talk, and check the Azure pricing calculator for your region.
+Almost all of the cost is VM hours: two to four hosts of the selected 4-vCPU/16-GiB size (default `Standard_D4ads_v5`) in Pool A and two in Pool B while the environment exists, plus their Premium SSD OS disks. The NAT gateway, the gallery replicas, the two source disks, Key Vault and Log Analytics add a little on top. Deploy the day before, remove it after the talk, and check the Azure pricing calculator for your region.
 
 ## How the code maps to the slides
 

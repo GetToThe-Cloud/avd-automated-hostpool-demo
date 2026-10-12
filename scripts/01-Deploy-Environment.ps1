@@ -79,6 +79,21 @@ if (-not (Get-AzContext)) { $null = Connect-AzAccount -Subscription $Subscriptio
 $null = Set-AzContext -Subscription $SubscriptionId
 Write-Host "`nDeploying the AVD automated host pool demo to $((Get-AzContext).Subscription.Name)`n" -ForegroundColor Cyan
 
+$deploymentTarget = Resolve-AvdDeploymentTarget -RequestedVmSize $VmSize -Region $Region
+if (-not $deploymentTarget.VmSizeSelection.Sku) { throw $deploymentTarget.FailureReason }
+if ($deploymentTarget.IsRegionFallback) {
+    Write-Warning "No compatible VM size is available in $Region; deploying to $($deploymentTarget.Region) instead."
+    $Region = $deploymentTarget.Region
+}
+$vmSelection = $deploymentTarget.VmSizeSelection
+$VmSize = $vmSelection.Sku.Name
+if ($vmSelection.IsFallback) {
+    Write-Warning "Requested VM size is restricted or incompatible; using $VmSize in $Region instead."
+}
+else {
+    Write-Host "  VM size: $VmSize ($($vmSelection.Sku.Family))"
+}
+
 # --- Demo users --------------------------------------------------------------------------
 if (-not $UsersGroupObjectId -and $UsersGroupName) {
     $groups = @(Get-AzADGroup -DisplayName $UsersGroupName)

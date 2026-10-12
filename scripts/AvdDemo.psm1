@@ -18,6 +18,161 @@ $script:UpdateRunningStates = @('Scheduled', 'ValidatingSessionHostUpdate', 'Upd
 
 #region Plumbing
 
+function Resolve-AvdVmSize {
+    <#
+    .SYNOPSIS
+    Uses the requested VM size when it is available, otherwise selects a compatible size.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)] [string] $RequestedVmSize,
+        [Parameter(Mandatory)] [string] $Region
+    )
+
+    $vmSkus = @(Get-AzComputeResourceSku -Location $Region | Where-Object { $_.ResourceType -eq 'virtualMachines' })
+    $requestedSku = $vmSkus | Where-Object { $_.Name -eq $RequestedVmSize } | Select-Object -First 1
+    if (-not $requestedSku) {
+        return [pscustomobject]@{
+            Sku           = $null
+            IsFallback    = $false
+            FailureReason = "$RequestedVmSize isn't available in $Region, so its required size can't be determined."
+        }
+    }
+
+    $requestedCapabilities = @{}
+    foreach ($capability in $requestedSku.Capabilities) {
+        $requestedCapabilities[$capability.Name] = $capability.Value
+    }
+    if (-not $requestedCapabilities['vCPUs'] -or -not $requestedCapabilities['MemoryGB']) {
+        return [pscustomobject]@{
+            Sku           = $null
+            IsFallback    = $false
+            FailureReason = "Azure didn't return vCPU and memory details for $RequestedVmSize."
+        }
+    }
+
+    $requiredVcpus = [int]$requestedCapabilities['vCPUs']
+    $requiredMemory = [decimal]$requestedCapabilities['MemoryGB']
+    $eligibleSkus = foreach ($candidate in $vmSkus) {
+        $restricted = @($candidate.Restrictions | Where-Object {
+            $_.ReasonCode -eq 'NotAvailableForSubscription' -and $_.Type -eq 'Location'
+        })
+        if ($restricted.Count) { continue }
+
+        $capabilities = @{}
+        foreach ($capability in $candidate.Capabilities) {
+            $capabilities[$capability.Name] = $capability.Value
+        }
+        if (-not $capabilities['vCPUs'] -or -not $capabilities['MemoryGB']) { continue }
+        if ([int]$capabilities['vCPUs'] -ne $requiredVcpus) { continue }
+        if ([decimal]$capabilities['MemoryGB'] -ne $requiredMemory) { continue }
+        if ($capabilities['PremiumIO'] -ne 'True') { continue }
+        if (($capabilities['HyperVGenerations'] -split ',') -notcontains 'V2') { continue }
+        if ($capabilities['TrustedLaunchDisabled'] -eq 'True') { continue }
+        if ($capabilities['TrustedLaunchSupported'] -eq 'False') { continue }
+        if ($capabilities['CpuArchitectureType'] -and $capabilities['CpuArchitectureType'] -ne 'x64') { continue }
+
+        $candidate
+    }
+
+    $selectedSku = $eligibleSkus | Where-Object { $_.Name -eq $RequestedVmSize } | Select-Object -First 1
+    if (-not $selectedSku) {
+        $selectedSku = $eligibleSkus |
+            Sort-Object -Property @{
+                Expression = {
+                    if ($_.Name -like 'Standard_D*_v5') { 0 }
+                    elseif ($_.Name -like 'Standard_D*') { 1 }
+                    else { 2 }
+                }
+            }, Name |
+            Select-Object -First 1
+    }
+
+    if (-not $selectedSku) {
+        return [pscustomobject]@{
+            Sku           = $null
+            IsFallback    = $false
+            FailureReason = "No unrestricted $requiredVcpus-vCPU, $requiredMemory-GB VM size in $Region supports Gen2, Trusted Launch, and Premium Storage."
+        }
+    }
+
+    [pscustomobject]@{
+        Sku           = $selectedSku
+        IsFallback    = $selectedSku.Name -ne $RequestedVmSize
+        FailureReason = $null
+    }
+}
+
+function Resolve-AvdDeploymentTarget {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)] [string] $RequestedVmSize,
+        [Parameter(Mandatory)] [string] $Region
+    )
+
+    $location = Get-AzLocation | Where-Object { $_.Location -eq $Region } | Select-Object -First 1
+    if (-not $location) {
+        return [pscustomobject]@{
+            Region             = $Region
+            VmSizeSelection    = $null
+            IsRegionFallback   = $false
+            FailureReason      = "Unknown Azure region '$Region'."
+        }
+    }
+
+    $selection = Resolve-AvdVmSize -RequestedVmSize $RequestedVmSize -Region $Region
+    if ($selection.Sku -or $Region -ine 'uksouth') {
+        return [pscustomobject]@{
+            Region           = $Region
+            VmSizeSelection  = $selection
+            IsRegionFallback = $false
+            FailureReason    = $selection.FailureReason
+        }
+    }
+
+    $fallbackRegion = 'westeurope'
+    $fallbackLocation = Get-AzLocation | Where-Object { $_.Location -eq $fallbackRegion } | Select-Object -First 1
+    if (-not $fallbackLocation) {
+        return [pscustomobject]@{
+            Region           = $Region
+            VmSizeSelection  = $null
+            IsRegionFallback = $false
+            FailureReason    = "$($selection.FailureReason) The West Europe fallback region is not available to this subscription."
+        }
+    }
+
+    $hostPoolRegions = (Get-AzResourceProvider -ProviderNamespace Microsoft.DesktopVirtualization).ResourceTypes |
+        Where-Object { $_.ResourceTypeName -eq 'hostpools' } |
+        Select-Object -ExpandProperty Locations
+    if ($hostPoolRegions -notcontains $fallbackLocation.DisplayName) {
+        return [pscustomobject]@{
+            Region           = $Region
+            VmSizeSelection  = $null
+            IsRegionFallback = $false
+            FailureReason    = "$($selection.FailureReason) AVD host pools are not supported in West Europe for this subscription."
+        }
+    }
+
+    $fallbackSelection = Resolve-AvdVmSize -RequestedVmSize $RequestedVmSize -Region $fallbackRegion
+    if (-not $fallbackSelection.Sku) {
+        return [pscustomobject]@{
+            Region           = $Region
+            VmSizeSelection  = $null
+            IsRegionFallback = $false
+            FailureReason    = "$($selection.FailureReason) West Europe also has no compatible VM size: $($fallbackSelection.FailureReason)"
+        }
+    }
+
+    [pscustomobject]@{
+        Region           = $fallbackRegion
+        VmSizeSelection  = $fallbackSelection
+        IsRegionFallback = $true
+        FailureReason    = $null
+    }
+}
+
 function Get-DemoEnvironmentPath {
     <#
     .SYNOPSIS
@@ -824,7 +979,7 @@ function Write-DemoLine {
 #endregion
 
 Export-ModuleMember -Function @(
-    'Get-DemoEnvironmentPath', 'Get-DemoEnvironment', 'Invoke-AvdApi', 'Get-AvdPlanTime',
+    'Resolve-AvdVmSize', 'Resolve-AvdDeploymentTarget', 'Get-DemoEnvironmentPath', 'Get-DemoEnvironment', 'Invoke-AvdApi', 'Get-AvdPlanTime',
     'ConvertTo-AvdDateTimeOffset', 'Test-AvdSameTimestamp', 'ConvertTo-AvdLocalTime', 'Get-ShortName', 'Get-ImageVersionName',
     'Get-AvdSessionHost', 'Get-AvdUserSession', 'Measure-AvdCapacity', 'Remove-AvdUserSession', 'Send-AvdUserMessage',
     'Get-AvdSessionHostConfiguration', 'Get-AvdSessionHostManagement', 'Set-AvdSessionHostImage',

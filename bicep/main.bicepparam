@@ -26,6 +26,9 @@ param marketplaceSku = 'win11-25h2-avd'
 param marketplaceVersionPrevious = '<second newest build>'
 param marketplaceVersionLatest = '<newest build>'
 
+// For direct Bicep deployments, set a size allowed by your subscription and region.
+// The PowerShell scripts automatically select a compatible alternative and may switch
+// from UK South to West Europe if UK South has no eligible VM size.
 param vmSize = 'Standard_D4ads_v5'
 param intuneEnrollment = false
 param vmAdminPassword = readEnvironmentVariable('AVD_DEMO_ADMIN_PASSWORD', '')
